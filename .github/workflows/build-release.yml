@@ -1,0 +1,72 @@
+name: 自动构建和发布
+
+on:
+  push:
+    tags:
+      - 'v*'  # 当推送标签时触发，例如 v1.0.0
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+      
+    - name: 设置 Python 环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install PySide6 Pillow reportlab nuitka ordered-set zstandard
+        
+    - name: 使用 Nuitka 构建可执行文件
+      run: |
+        python -m nuitka --standalone --onefile --enable-plugin=pyside6 --windows-disable-console --output-dir=dist --output-filename=figer-paper-tool.exe figer.py
+        
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: figer-paper-tool-windows
+        path: dist/figer-paper-tool.exe
+        
+  create-release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: 下载构建产物
+      uses: actions/download-artifact@v4
+      with:
+        name: figer-paper-tool-windows
+        
+    - name: 创建 Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: figer-paper-tool.exe
+        body: |
+          ## 🎉 论文组图工具 ${{ github.ref_name }}
+          
+          ### 下载说明
+          - Windows 用户：下载 `figer-paper-tool.exe`，双击运行即可
+          
+          ### 主要功能
+          - 📐 多种专业布局模板
+          - 🖼️ 可视化图片编辑
+          - 🏷️ 自动子图标注
+          - 📤 PNG/PDF 导出
+          
+          ### 使用方法
+          1. 下载 `.exe` 文件
+          2. 双击运行（无需安装 Python）
+          3. 导入图片并选择布局
+          4. 导出为 PNG 或 PDF
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
