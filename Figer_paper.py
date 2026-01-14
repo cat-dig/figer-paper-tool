@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QMessageBox,
     QGroupBox, QFormLayout, QLineEdit, QSplitter, QToolBar, QMenu,
     QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsPixmapItem,
-    QGraphicsRectItem, QGraphicsLineItem, QStackedWidget, QGraphicsObject
+    QGraphicsRectItem, QGraphicsLineItem, QStackedWidget, QGraphicsObject,
+    QSizePolicy, QRadioButton, QScrollArea
 )
 
 APP_TITLE = "论文组图工具（GUI）"
@@ -211,13 +212,122 @@ class CellSpec:
     image_offset_y: float = 0.0
     image_scale: float = 1.0
     image_path: Optional[str] = None
+    # 独立的标注位置和颜色（如果为None则使用全局设置）
+    label_x: Optional[float] = None  # 标注X位置（0-1相对位置）
+    label_y: Optional[float] = None  # 标注Y位置（0-1相对位置）
+    label_color: Optional[str] = None  # 标注颜色："黑色" / "白色"
+
+
+def generate_irregular_layout(rows_list: List[int]) -> List[CellSpec]:
+    """
+    生成不规则的行列布局，自动为每行的图片居中对齐。
+    所有子图框的大小完全一致，基于最大列数计算。
+    
+    Args:
+        rows_list: 每行的列数，如 [3, 2] 表示上面3个，下面2个
+    
+    Returns:
+        List[CellSpec]: 布局规格列表
+    
+    示例:
+        generate_irregular_layout([3, 2])  # 第一行3个，第二行2个（第二行居中）
+        所有框的大小都是 1/3，高度都是 0.5
+        第一行：[0, 0, 1/3, 0.5], [1/3, 0, 1/3, 0.5], [2/3, 0, 1/3, 0.5]
+        第二行：[1/6, 0.5, 1/3, 0.5], [1/2, 0.5, 1/3, 0.5]  (居中对齐）
+    """
+    if not rows_list or all(c == 0 for c in rows_list):
+        return []
+    
+    specs = []
+    num_rows = len(rows_list)
+    row_height = 1.0 / num_rows
+    
+    # 关键修改：使用所有行中的最大列数作为统一的列宽基准
+    # 这样所有子图框的宽度都一样
+    max_cols = max(rows_list)
+    unified_col_width = 1.0 / max_cols
+    
+    for row_idx, num_cols in enumerate(rows_list):
+        if num_cols <= 0:
+            continue
+        
+        # 计算此行的起始X位置（居中对齐）
+        # 此行实际占用的宽度
+        row_used_width = unified_col_width * num_cols
+        offset_x = (1.0 - row_used_width) / 2
+        
+        # 添加此行的各个格子（使用统一的列宽）
+        for col_idx in range(num_cols):
+            x = offset_x + col_idx * unified_col_width
+            y = row_idx * row_height
+            specs.append(CellSpec(x, y, unified_col_width, row_height))
+    
+    return specs
+
+
+def parse_layout_string(layout_str: str) -> Optional[Tuple]:
+    """
+    解析用户输入的布局字符串，支持以下格式：
+    - "2x2" 或 "2×2": 2行2列网格
+    - "[3,2]" 或 "3,2": 不规则布局（第一行3个，第二行2个）
+    
+    Args:
+        layout_str: 用户输入的布局字符串
+    
+    Returns:
+        若为规则网格返回 ('grid', rows, cols)，不规则返回 ('irregular', rows_list)
+        解析失败返回 None
+    """
+    layout_str = layout_str.strip()
+    
+    # 检查是否为网格格式 (如 "2x2", "2×2")
+    if 'x' in layout_str.lower() or '×' in layout_str:
+        parts = layout_str.replace('×', 'x').lower().split('x')
+        try:
+            rows = int(parts[0].strip())
+            cols = int(parts[1].strip())
+            if rows > 0 and cols > 0:
+                return ('grid', rows, cols)
+        except (ValueError, IndexError):
+            pass
+    
+    # 检查是否为不规则格式 (如 "[3,2]", "3,2")
+    layout_str = layout_str.strip('[]').strip()
+    if ',' in layout_str:
+        try:
+            parts = [int(p.strip()) for p in layout_str.split(',')]
+            if all(p > 0 for p in parts):
+                return ('irregular', parts)
+        except ValueError:
+            pass
+    
+    return None
 
 
 def build_layout(name: str) -> List[CellSpec]:
     """
     返回一组 CellSpec，顺序对应图片顺序（也对应标注 a,b,c...）
-    所有布局都按“常用论文版式”预设，最终画布高度由布局+间距+边距决定。
+    所有布局都按"常用论文版式"预设，最终画布高度由布局+间距+边距决定。
+    
+    支持以下格式：
+    - 预定义布局名称（如 "2×2 网格"）
+    - 自定义布局字符串（如 "2x2", "[3,2]"）
     """
+    # 尝试解析自定义布局字符串
+    parsed = parse_layout_string(name)
+    if parsed:
+        if parsed[0] == 'grid':
+            rows, cols = parsed[1], parsed[2]
+            specs = []
+            cell_w = 1.0 / cols
+            cell_h = 1.0 / rows
+            for r in range(rows):
+                for c in range(cols):
+                    specs.append(CellSpec(c * cell_w, r * cell_h, cell_w, cell_h))
+            return specs
+        elif parsed[0] == 'irregular':
+            return generate_irregular_layout(parsed[1])
+    
     # 自定义网格支持
     if name == "自定义网格":
         # 使用传入的 rows 和 cols 参数（需要在调用时传递）
@@ -298,6 +408,12 @@ class PanelSpec:
     image_offset_x: float = 0.0  # 图片在框内的水平偏移（相对于框宽的比例，-1~1）
     image_offset_y: float = 0.0  # 图片在框内的垂直偏移（相对于框高的比例，-1~1）
     image_scale: float = 1.0     # 图片在框内的缩放比例（>0，1.0为默认填满）
+    # 独立的标注位置和颜色（如果为None则使用全局设置）
+    label_x: Optional[float] = None  # 标注X位置（0-1相对位置）
+    label_y: Optional[float] = None  # 标注Y位置（0-1相对位置）
+    label_color: Optional[str] = None  # 标注颜色："黑色" / "白色"
+    label_y: Optional[float] = None  # 标注Y位置（0-1相对位置）
+    label_color: Optional[str] = None  # 标注颜色："黑色" / "白色"
 
 @dataclass
 class CanvasSpec:
@@ -418,6 +534,13 @@ class ResizeHandle(QGraphicsRectItem):
     def mouseMoveEvent(self, event):
         # 实际缩放逻辑在父级 PanelItem 处理
         self.parentItem().handle_move(self, event.pos())
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        # 通知父级面板触发布局变更，驱动实时预览刷新
+        parent = self.parentItem()
+        if isinstance(parent, PanelItem):
+            parent.layoutChanged.emit()
 
 class SnapGuideLine(QGraphicsLineItem):
     """吸附辅助线"""
@@ -597,7 +720,22 @@ class PanelItem(QGraphicsObject):
         # 标签 (a, b, c...)
         if self.spec.label_index >= 0:
             label = chr(ord('a') + self.spec.label_index)
-            painter.setPen(Qt.GlobalColor.black)
+            
+            # 获取标注颜色（优先使用子图独立设置，否则使用全局设置）
+            label_color = self.spec.label_color
+            if label_color is None:
+                host = self._get_main_window()
+                if host and hasattr(host, 'cmb_label_color'):
+                    label_color = host.cmb_label_color.currentText()
+                else:
+                    label_color = "黑色"
+            
+            # 设置标注颜色
+            if label_color == "白色":
+                painter.setPen(Qt.GlobalColor.white)
+            else:
+                painter.setPen(Qt.GlobalColor.black)
+            
             font = painter.font()
             font.setPixelSize(4) # 4mm 左右
             painter.setFont(font)
@@ -608,8 +746,18 @@ class PanelItem(QGraphicsObject):
             if host and hasattr(host, 'cmb_label_pos'):
                 label_mode = host.cmb_label_pos.currentText()
             
-            if label_mode == "自定义":
-                # 自定义模式沿用主界面滑块参数，不再支持拖拽红色方块
+            # 获取标注位置（优先使用子图独立设置）
+            if self.spec.label_x is not None and self.spec.label_y is not None:
+                # 使用子图独立的标注位置
+                x_ratio = self.spec.label_x
+                y_ratio = self.spec.label_y
+                pos_x = rect.width() * x_ratio
+                pos_y = rect.height() * y_ratio
+                painter.drawText(QRectF(pos_x, pos_y, rect.width(), rect.height()), 
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, 
+                                 f"({label})")
+            elif label_mode == "自定义":
+                # 自定义模式沿用主界面滑块参数
                 x_ratio = 0.05
                 y_ratio = 0.05
                 if host and hasattr(host, 'slider_label_x') and hasattr(host, 'slider_label_y'):
@@ -1179,6 +1327,85 @@ class CanvasEditorWidget(QWidget):
                                         self.canvas_h - 2*self.margin,
                                         QPen(QColor(220, 220, 220), 0.2, Qt.PenStyle.DashLine))
         margin_rect.setZValue(-9)
+        
+        # 监听选中事件
+        self.scene.selectionChanged.connect(self._on_selection_changed)
+    
+    def _on_selection_changed(self):
+        """选中项改变时更新主窗口的单个子图标注控件"""
+        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, PanelItem)]
+        
+        # 获取主窗口
+        main_window = self.window()
+        if not main_window or not hasattr(main_window, 'chk_use_single_label'):
+            return
+        
+        if len(selected_items) == 1:
+            # 只有一个面板被选中时，启用复选框并更新UI
+            panel = selected_items[0]
+            
+            # 启用复选框
+            main_window.chk_use_single_label.setEnabled(True)
+            main_window.chk_use_single_label.setToolTip("勾选后可以为此子图单独设置标注位置和颜色")
+            
+            # 检查是否有独立的标注设置
+            has_custom_label = (panel.spec.label_x is not None and 
+                              panel.spec.label_y is not None)
+            
+            # 更新复选框状态
+            main_window.chk_use_single_label.blockSignals(True)
+            main_window.chk_use_single_label.setChecked(has_custom_label)
+            main_window.chk_use_single_label.blockSignals(False)
+            
+            # 更新位置和颜色控件的值
+            if has_custom_label:
+                main_window.sp_single_label_x.blockSignals(True)
+                main_window.sp_single_label_x.setValue(panel.spec.label_x * 100)
+                main_window.sp_single_label_x.blockSignals(False)
+                
+                main_window.sp_single_label_y.blockSignals(True)
+                main_window.sp_single_label_y.setValue(panel.spec.label_y * 100)
+                main_window.sp_single_label_y.blockSignals(False)
+                
+                if panel.spec.label_color:
+                    main_window.cmb_single_label_color.blockSignals(True)
+                    main_window.cmb_single_label_color.setCurrentText(panel.spec.label_color)
+                    main_window.cmb_single_label_color.blockSignals(False)
+            else:
+                # 没有独立设置时，显示默认值
+                main_window.sp_single_label_x.blockSignals(True)
+                main_window.sp_single_label_x.setValue(5.0)
+                main_window.sp_single_label_x.blockSignals(False)
+                
+                main_window.sp_single_label_y.blockSignals(True)
+                main_window.sp_single_label_y.setValue(5.0)
+                main_window.sp_single_label_y.blockSignals(False)
+                
+                main_window.cmb_single_label_color.blockSignals(True)
+                main_window.cmb_single_label_color.setCurrentText("黑色")
+                main_window.cmb_single_label_color.blockSignals(False)
+            
+            # 根据复选框状态启用/禁用控件
+            main_window.lbl_single_label_x.setEnabled(has_custom_label)
+            main_window.sp_single_label_x.setEnabled(has_custom_label)
+            main_window.lbl_single_label_y.setEnabled(has_custom_label)
+            main_window.sp_single_label_y.setEnabled(has_custom_label)
+            main_window.lbl_single_label_color.setEnabled(has_custom_label)
+            main_window.cmb_single_label_color.setEnabled(has_custom_label)
+        else:
+            # 多个或没有面板被选中，禁用复选框和所有控件
+            main_window.chk_use_single_label.setEnabled(False)
+            main_window.chk_use_single_label.setToolTip("请先在画布中选中一个子图")
+            main_window.chk_use_single_label.blockSignals(True)
+            main_window.chk_use_single_label.setChecked(False)
+            main_window.chk_use_single_label.blockSignals(False)
+            
+            main_window.lbl_single_label_x.setEnabled(False)
+            main_window.sp_single_label_x.setEnabled(False)
+            main_window.lbl_single_label_y.setEnabled(False)
+            main_window.sp_single_label_y.setEnabled(False)
+            main_window.lbl_single_label_color.setEnabled(False)
+            main_window.cmb_single_label_color.setEnabled(False)
 
     def _fit_view(self):
         """让画布初始填充视口，避免背景看起来无法缩放"""
@@ -1384,6 +1611,9 @@ class CanvasEditorWidget(QWidget):
             center_y = sum(i.pos().y() + i.spec.h_mm/2 for i in items) / len(items)
             for i in items: i.setPos(i.pos().x(), center_y - i.spec.h_mm/2)
 
+        if hasattr(self.window(), "schedule_preview"):
+            self.window().schedule_preview()
+
     def distribute_selected(self, mode):
         items = [i for i in self.scene.selectedItems() if isinstance(i, PanelItem)]
         if len(items) < 3: return
@@ -1412,6 +1642,9 @@ class CanvasEditorWidget(QWidget):
             for i in items:
                 i.setPos(i.pos().x(), curr_y)
                 curr_y += i.spec.h_mm + gap
+
+        if hasattr(self.window(), "schedule_preview"):
+            self.window().schedule_preview()
 
     def apply_gap_to_selected(self):
         """应用右侧面板设置的间距"""
@@ -1481,7 +1714,10 @@ class CanvasEditorWidget(QWidget):
                 image_offset_x=item.spec.image_offset_x,
                 image_offset_y=item.spec.image_offset_y,
                 image_scale=item.spec.image_scale,
-                image_path=item.spec.image_path
+                image_path=item.spec.image_path,
+                label_x=item.spec.label_x,
+                label_y=item.spec.label_y,
+                label_color=item.spec.label_color
             ))
         return specs
 
@@ -1516,6 +1752,16 @@ class RenderConfig:
     custom_specs: Optional[List[CellSpec]] = None  # 自定义模式的布局
     label_custom_x: float = 0.05  # 自定义标注X位置（0-1相对位置）
     label_custom_y: float = 0.05  # 自定义标注Y位置（0-1相对位置）
+    label_color: str = "黑色"  # 标注颜色："黑色" / "白色"
+    label_style: str = "无框"  # 标注样式："有框" / "无框" / "半透明背景"
+    # 子图边框选项
+    border_enabled: bool = True  # 是否显示子图边框
+    border_width: float = 1.0  # 边框宽度（px）
+    border_color: str = "黑色"  # 边框颜色："黑色" / "白色" / "灰色"
+    border_style: str = "实线"  # 边框样式："实线" / "虚线"
+    # 标注字体样式
+    label_font_weight: str = "Regular"  # 字体粗细："Regular" / "Bold"
+    label_font_italic: bool = False  # 是否斜体
 
 
 def trim_whitespace(img: Image.Image, threshold: int = 245) -> Image.Image:
@@ -1806,8 +2052,13 @@ def render_montage(paths: List[str], cfg: RenderConfig) -> Tuple[Image.Image, Li
             bbox = draw.textbbox((0, 0), label, font=font_en)
             lw = bbox[2] - bbox[0]
             lh = bbox[3] - bbox[1]
-
-            if cfg.label_pos == "左上":
+            
+            # 获取标注位置（优先使用cell独立设置，否则使用全局设置）
+            if cell.label_x is not None and cell.label_y is not None:
+                # 使用子图独立的标注位置
+                lx = x1 + int(box_w * cell.label_x)
+                ly = y1 + int(box_h * cell.label_y)
+            elif cfg.label_pos == "左上":
                 lx = x1 + label_pad
                 ly = y1 + label_pad
             elif cfg.label_pos == "左下":
@@ -1816,15 +2067,102 @@ def render_montage(paths: List[str], cfg: RenderConfig) -> Tuple[Image.Image, Li
             else:  # 自定义位置
                 lx = x1 + int(box_w * cfg.label_custom_x)
                 ly = y1 + int(box_h * cfg.label_custom_y)
+            
+            # 获取标注颜色（优先使用cell独立设置，否则使用全局设置）
+            label_color = cell.label_color if cell.label_color else cfg.label_color
+            if label_color == "白色":
+                text_color = (255, 255, 255)
+                bg_color = (0, 0, 0)  # 白色文字用黑色背景
+            else:
+                text_color = (0, 0, 0)
+                bg_color = (255, 255, 255)  # 黑色文字用白色背景
 
-            # 白底小底板（避免压在复杂背景上看不清），透明不易做；这里用白底+细边框
-            pad_box = max(2, int(round(lh * 0.20)))
-            rx1 = lx - pad_box
-            ry1 = ly - pad_box
-            rx2 = lx + lw + pad_box
-            ry2 = ly + lh + pad_box
-            draw.rectangle([rx1, ry1, rx2, ry2], fill=(255, 255, 255), outline=(0, 0, 0), width=1)
-            draw.text((lx, ly), label, fill=(0, 0, 0), font=font_en)
+            # 根据标注样式绘制
+            label_style = cfg.label_style
+            
+            if label_style == "无框":
+                # 纯文字，不带背景
+                draw.text((lx, ly), label, fill=text_color, font=font_en)
+            
+            elif label_style == "有框":
+                # 带背景框和边框
+                pad_box = max(2, int(round(lh * 0.20)))
+                rx1 = lx - pad_box
+                ry1 = ly - pad_box
+                rx2 = lx + lw + pad_box
+                ry2 = ly + lh + pad_box
+                draw.rectangle([rx1, ry1, rx2, ry2], fill=bg_color, outline=text_color, width=1)
+                draw.text((lx, ly), label, fill=text_color, font=font_en)
+            
+            elif label_style == "半透明背景":
+                # 创建半透明背景
+                pad_box = max(2, int(round(lh * 0.20)))
+                rx1 = lx - pad_box
+                ry1 = ly - pad_box
+                rx2 = lx + lw + pad_box
+                ry2 = ly + lh + pad_box
+                
+                # 创建一个临时的RGBA图层用于半透明效果
+                overlay = Image.new('RGBA', canvas.size, (255, 255, 255, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                
+                # 绘制半透明背景（使用与文字相反的颜色，透明度70%）
+                alpha = 178  # 70% 不透明度
+                if label_color == "白色":
+                    bg_rgba = (0, 0, 0, alpha)
+                else:
+                    bg_rgba = (255, 255, 255, alpha)
+                
+                overlay_draw.rectangle([rx1, ry1, rx2, ry2], fill=bg_rgba)
+                
+                # 合并半透明层
+                canvas_rgba = canvas.convert('RGBA')
+                canvas_rgba = Image.alpha_composite(canvas_rgba, overlay)
+                canvas.paste(canvas_rgba.convert('RGB'))
+                
+                # 绘制文字
+                draw.text((lx, ly), label, fill=text_color, font=font_en)
+        
+        # 子图边框
+        if cfg.border_enabled:
+            border_color_map = {
+                "黑色": (0, 0, 0),
+                "白色": (255, 255, 255),
+                "灰色": (128, 128, 128)
+            }
+            border_color = border_color_map.get(cfg.border_color, (0, 0, 0))
+            border_width = int(max(1, cfg.border_width))
+            
+            if cfg.border_style == "虚线":
+                # 手动绘制虚线边框（PIL 不直接支持虚线矩形）
+                dash_length = 10
+                gap_length = 5
+                # 顶边
+                x = x1
+                while x < x2:
+                    end_x = min(x + dash_length, x2)
+                    draw.line([(x, y1), (end_x, y1)], fill=border_color, width=border_width)
+                    x = end_x + gap_length
+                # 底边
+                x = x1
+                while x < x2:
+                    end_x = min(x + dash_length, x2)
+                    draw.line([(x, y2), (end_x, y2)], fill=border_color, width=border_width)
+                    x = end_x + gap_length
+                # 左边
+                y = y1
+                while y < y2:
+                    end_y = min(y + dash_length, y2)
+                    draw.line([(x1, y), (x1, end_y)], fill=border_color, width=border_width)
+                    y = end_y + gap_length
+                # 右边
+                y = y1
+                while y < y2:
+                    end_y = min(y + dash_length, y2)
+                    draw.line([(x2, y), (x2, end_y)], fill=border_color, width=border_width)
+                    y = end_y + gap_length
+            else:  # 实线
+                draw.rectangle([x1, y1, x2, y2], outline=border_color, width=border_width)
 
     return canvas, warnings
 
@@ -1881,9 +2219,25 @@ class MainWindow(QMainWindow):
 
         self.image_paths: List[str] = []
         self.last_render: Optional[Image.Image] = None
+        
+        # 撤销/重做系统
+        self.undo_stack = []  # 历史状态栈
+        self.redo_stack = []  # 重做栈
+        self.max_undo_steps = 50
+        
+        # 布局管理器
+        try:
+            from layout_manager import LayoutManager
+            self.layout_manager = LayoutManager()
+        except ImportError:
+            self.layout_manager = None
+            print("[WARN] layout_manager.py not found, save/load disabled")
 
         self._build_ui()
         self._build_toolbar()
+        
+        # 保存初始状态
+        self._save_state()
 
     # ---------- UI ----------
     def _build_toolbar(self):
@@ -1891,7 +2245,9 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
+        # 文件操作
         act_add = QAction("导入图片", self)
+        act_add.setShortcut("Ctrl+I")
         act_add.triggered.connect(self.on_add_files)
         tb.addAction(act_add)
 
@@ -1900,12 +2256,44 @@ class MainWindow(QMainWindow):
         tb.addAction(act_add_dir)
 
         act_remove = QAction("删除选中", self)
+        act_remove.setShortcut("Delete")
         act_remove.triggered.connect(self.on_remove_selected)
         tb.addAction(act_remove)
 
         tb.addSeparator()
+        
+        # 布局操作
+        if self.layout_manager:
+            act_save_layout = QAction("保存布局", self)
+            act_save_layout.setShortcut("Ctrl+S")
+            act_save_layout.triggered.connect(self.on_save_layout)
+            tb.addAction(act_save_layout)
+            
+            act_load_layout = QAction("加载布局", self)
+            act_load_layout.setShortcut("Ctrl+O")
+            act_load_layout.triggered.connect(self.on_load_layout)
+            tb.addAction(act_load_layout)
+            
+            tb.addSeparator()
+        
+        # 撤销/重做
+        self.act_undo = QAction("撤销", self)
+        self.act_undo.setShortcut("Ctrl+Z")
+        self.act_undo.setEnabled(False)
+        self.act_undo.triggered.connect(self.on_undo)
+        tb.addAction(self.act_undo)
+        
+        self.act_redo = QAction("重做", self)
+        self.act_redo.setShortcut("Ctrl+Y")
+        self.act_redo.setEnabled(False)
+        self.act_redo.triggered.connect(self.on_redo)
+        tb.addAction(self.act_redo)
+        
+        tb.addSeparator()
 
+        # 导出
         act_export = QAction("导出", self)
+        act_export.setShortcut("Ctrl+E")
         act_export.triggered.connect(self.on_export)
         tb.addAction(act_export)
 
@@ -1934,16 +2322,30 @@ class MainWindow(QMainWindow):
         # 创建画布编辑器（支持图片编辑功能）
         self.canvas_editor = CanvasEditorWidget()
         
+        # 渲染预览区域
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+        
+        # 预览标题
+        preview_title = QLabel("预览区域")
+        preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_title.setStyleSheet("QLabel{background:#e0e0e0; padding:5px; font-weight:bold; color:black;}")
+        preview_layout.addWidget(preview_title)
+        
         # 渲染预览标签
         self.preview_label = QLabel("渲染预览")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setStyleSheet("QLabel{background:#f7f7f7; border:1px solid #cfcfcf;}")
         self.preview_label.setMinimumWidth(300)
+        self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        preview_layout.addWidget(self.preview_label)
         
         # 分割器（画布编辑器 + 渲染预览）
         self.canvas_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.canvas_splitter.addWidget(self.canvas_editor)
-        self.canvas_splitter.addWidget(self.preview_label)
+        self.canvas_splitter.addWidget(preview_container)
         self.canvas_splitter.setStretchFactor(0, 1)
         self.canvas_splitter.setStretchFactor(1, 1)
 
@@ -1951,17 +2353,126 @@ class MainWindow(QMainWindow):
         mid_layout = QVBoxLayout(mid_box)
         mid_layout.addWidget(self.canvas_splitter)
 
-        # 右：参数
-        right_box = QGroupBox("论文参数 / 布局 / 标注")
-        form = QFormLayout(right_box)
+        # 右：参数（使用滚动区域）
+        right_content = QWidget()
+        form = QFormLayout(right_content)
 
         self.cmb_layout = QComboBox()
         self.cmb_layout.addItems([
             "1+2（上大下两小）", "2+1（上两小下大）", "左大右两小", "右大左两小", 
-            "2×2 网格", "3×2 网格", "自定义模式"
+            "2×2 网格", "3×2 网格", "快捷自定义", "自定义模式"
         ])
         self.cmb_layout.currentTextChanged.connect(self.on_layout_changed)
         form.addRow("布局模板", self.cmb_layout)
+        
+        # ========== 快捷自定义布局区域（优化版） ==========
+        # 标题行（带帮助按钮）
+        quick_title_widget = QWidget()
+        quick_title_layout = QHBoxLayout(quick_title_widget)
+        quick_title_layout.setContentsMargins(0, 0, 0, 0)
+        quick_title_layout.setSpacing(5)
+        
+        self.lbl_custom_layout = QLabel("布局类型")
+        self.btn_layout_help = QPushButton("❓")
+        self.btn_layout_help.setMaximumWidth(30)
+        self.btn_layout_help.setToolTip("点击查看详细使用说明")
+        self.btn_layout_help.setStyleSheet("QPushButton { font-size: 12pt; padding: 2px; }")
+        self.btn_layout_help.clicked.connect(self.show_layout_help)
+        
+        quick_title_layout.addWidget(self.lbl_custom_layout)
+        quick_title_layout.addWidget(self.btn_layout_help)
+        quick_title_layout.addStretch()
+        quick_title_widget.setVisible(False)
+        self.quick_title_widget = quick_title_widget
+        
+        # 布局类型选择（规则网格 / 不规则布局）
+        layout_type_widget = QWidget()
+        layout_type_layout = QHBoxLayout(layout_type_widget)
+        layout_type_layout.setContentsMargins(0, 0, 0, 0)
+        layout_type_layout.setSpacing(10)
+        
+        self.rb_grid_layout = QRadioButton("规则网格")
+        self.rb_irregular_layout = QRadioButton("不规则布局")
+        self.rb_grid_layout.setChecked(True)
+        self.rb_grid_layout.toggled.connect(self.on_layout_type_changed)
+        
+        layout_type_layout.addWidget(self.rb_grid_layout)
+        layout_type_layout.addWidget(self.rb_irregular_layout)
+        layout_type_layout.addStretch()
+        
+        layout_type_widget.setVisible(False)
+        self.layout_type_widget = layout_type_widget
+        
+        # 规则网格参数
+        grid_params_widget = QWidget()
+        grid_params_layout = QHBoxLayout(grid_params_widget)
+        grid_params_layout.setContentsMargins(0, 0, 0, 0)
+        grid_params_layout.setSpacing(10)
+        
+        grid_params_layout.addWidget(QLabel("行数:"))
+        self.sp_custom_rows = QSpinBox()
+        self.sp_custom_rows.setRange(1, 10)
+        self.sp_custom_rows.setValue(2)
+        self.sp_custom_rows.setMaximumWidth(60)
+        self.sp_custom_rows.valueChanged.connect(self.on_custom_grid_params_changed)
+        grid_params_layout.addWidget(self.sp_custom_rows)
+        
+        grid_params_layout.addWidget(QLabel("列数:"))
+        self.sp_custom_cols = QSpinBox()
+        self.sp_custom_cols.setRange(1, 10)
+        self.sp_custom_cols.setValue(2)
+        self.sp_custom_cols.setMaximumWidth(60)
+        self.sp_custom_cols.valueChanged.connect(self.on_custom_grid_params_changed)
+        grid_params_layout.addWidget(self.sp_custom_cols)
+        
+        grid_params_layout.addStretch()
+        grid_params_widget.setVisible(False)
+        self.grid_params_widget = grid_params_widget
+        
+        # 不规则布局参数
+        irregular_params_widget = QWidget()
+        irregular_params_layout = QVBoxLayout(irregular_params_widget)
+        irregular_params_layout.setContentsMargins(0, 0, 0, 0)
+        irregular_params_layout.setSpacing(5)
+        
+        # 行数控制
+        row_count_layout = QHBoxLayout()
+        row_count_layout.addWidget(QLabel("行数:"))
+        self.sp_irregular_rows = QSpinBox()
+        self.sp_irregular_rows.setRange(1, 10)
+        self.sp_irregular_rows.setValue(2)
+        self.sp_irregular_rows.setMaximumWidth(60)
+        self.sp_irregular_rows.valueChanged.connect(self.on_irregular_rows_changed)
+        row_count_layout.addWidget(self.sp_irregular_rows)
+        row_count_layout.addStretch()
+        irregular_params_layout.addLayout(row_count_layout)
+        
+        # 每行列数控制（动态生成）
+        self.irregular_cols_container = QWidget()
+        self.irregular_cols_layout = QVBoxLayout(self.irregular_cols_container)
+        self.irregular_cols_layout.setContentsMargins(0, 0, 0, 0)
+        self.irregular_cols_layout.setSpacing(3)
+        self.irregular_col_spinboxes = []
+        
+        irregular_params_layout.addWidget(self.irregular_cols_container)
+        
+        irregular_params_widget.setVisible(False)
+        self.irregular_params_widget = irregular_params_widget
+        
+        # 保留原来的输入框（隐藏，用于内部存储布局字符串）
+        # 必须先创建这个，因为后面的初始化会用到
+        self.ed_custom_layout = QLineEdit()
+        self.ed_custom_layout.setVisible(False)
+        self.ed_custom_layout.textChanged.connect(self.on_custom_layout_input_changed)
+        
+        # 添加到表单
+        form.addRow(quick_title_widget)
+        form.addRow("", layout_type_widget)
+        form.addRow("", grid_params_widget)
+        form.addRow("", irregular_params_widget)
+        
+        # 初始化不规则布局的列数控制（必须在ed_custom_layout创建之后）
+        self.on_irregular_rows_changed()
         
         # 自定义网格参数 (保留引用但隐藏，因为旧逻辑可能还在用)
         self.sp_grid_rows = QSpinBox()
@@ -2013,6 +2524,51 @@ class MainWindow(QMainWindow):
         self.sp_gap.setValue(2.0)
         self.sp_gap.valueChanged.connect(lambda: self.schedule_preview())
         form.addRow("子图间距（mm）", self.sp_gap)
+        
+        # 子图宽高比设置
+        self.cmb_aspect_ratio = QComboBox()
+        self.cmb_aspect_ratio.addItems([
+            "自动（默认）",
+            "1:1（正方形）",
+            "4:3（横向）",
+            "16:9（横向）",
+            "3:4（竖向）",
+            "9:16（竖向）",
+            "自定义比例"
+        ])
+        self.cmb_aspect_ratio.setCurrentText("自动（默认）")
+        self.cmb_aspect_ratio.setToolTip("调整子图框的宽高比例\n自动：根据布局自动计算\n其他：所有子图框使用统一比例")
+        self.cmb_aspect_ratio.currentTextChanged.connect(self.on_aspect_ratio_changed)
+        form.addRow("子图宽高比", self.cmb_aspect_ratio)
+        
+        # 自定义宽高比控件
+        custom_ratio_widget = QWidget()
+        custom_ratio_layout = QHBoxLayout(custom_ratio_widget)
+        custom_ratio_layout.setContentsMargins(0, 0, 0, 0)
+        custom_ratio_layout.setSpacing(5)
+        
+        custom_ratio_layout.addWidget(QLabel("宽:"))
+        self.sp_aspect_width = QDoubleSpinBox()
+        self.sp_aspect_width.setRange(0.1, 10.0)
+        self.sp_aspect_width.setDecimals(1)
+        self.sp_aspect_width.setValue(1.0)
+        self.sp_aspect_width.setMaximumWidth(60)
+        self.sp_aspect_width.valueChanged.connect(self.on_custom_aspect_changed)
+        custom_ratio_layout.addWidget(self.sp_aspect_width)
+        
+        custom_ratio_layout.addWidget(QLabel("高:"))
+        self.sp_aspect_height = QDoubleSpinBox()
+        self.sp_aspect_height.setRange(0.1, 10.0)
+        self.sp_aspect_height.setDecimals(1)
+        self.sp_aspect_height.setValue(1.0)
+        self.sp_aspect_height.setMaximumWidth(60)
+        self.sp_aspect_height.valueChanged.connect(self.on_custom_aspect_changed)
+        custom_ratio_layout.addWidget(self.sp_aspect_height)
+        
+        custom_ratio_layout.addStretch()
+        custom_ratio_widget.setVisible(False)
+        self.custom_ratio_widget = custom_ratio_widget
+        form.addRow("", custom_ratio_widget)
         
         # 图片适配模式
         self.cmb_fit_mode = QComboBox()
@@ -2079,6 +2635,97 @@ class MainWindow(QMainWindow):
         self.sp_label_pad.setValue(1.5)
         self.sp_label_pad.valueChanged.connect(lambda: self.schedule_preview())
         form.addRow("标注内边距（mm）", self.sp_label_pad)
+        
+        # 标注颜色（全局）
+        self.lbl_label_color = QLabel("标注颜色")
+        self.cmb_label_color = QComboBox()
+        self.cmb_label_color.addItems(["黑色", "白色"])
+        self.cmb_label_color.setCurrentText("黑色")
+        self.cmb_label_color.currentTextChanged.connect(lambda: self.schedule_preview())
+        form.addRow(self.lbl_label_color, self.cmb_label_color)
+        
+        # 标注样式（全局）
+        self.lbl_label_style = QLabel("标注样式")
+        self.cmb_label_style = QComboBox()
+        self.cmb_label_style.addItems(["无框", "有框", "半透明背景"])
+        self.cmb_label_style.setCurrentText("无框")
+        self.cmb_label_style.setToolTip("无框：纯文字，简洁\n有框：带背景框和边框，醒目\n半透明背景：半透明背景，美观且清晰")
+        self.cmb_label_style.currentTextChanged.connect(lambda: self.schedule_preview())
+        form.addRow(self.lbl_label_style, self.cmb_label_style)
+        
+        # 单个子图标注独立控制
+        form.addRow(QLabel(""))  # 分隔
+        self.lbl_single_label = QLabel("【选中子图的标注设置】")
+        form.addRow(self.lbl_single_label)
+        
+        self.chk_use_single_label = QCheckBox("使用独立的标注位置")
+        self.chk_use_single_label.setChecked(False)
+        self.chk_use_single_label.stateChanged.connect(self.on_single_label_toggle)
+        form.addRow(self.chk_use_single_label)
+        
+        self.lbl_single_label_x = QLabel("X位置（%）")
+        self.sp_single_label_x = QDoubleSpinBox()
+        self.sp_single_label_x.setRange(0.0, 100.0)
+        self.sp_single_label_x.setDecimals(1)
+        self.sp_single_label_x.setValue(5.0)
+        self.sp_single_label_x.setSuffix("%")
+        self.sp_single_label_x.valueChanged.connect(self.on_single_label_pos_changed)
+        form.addRow(self.lbl_single_label_x, self.sp_single_label_x)
+        
+        self.lbl_single_label_y = QLabel("Y位置（%）")
+        self.sp_single_label_y = QDoubleSpinBox()
+        self.sp_single_label_y.setRange(0.0, 100.0)
+        self.sp_single_label_y.setDecimals(1)
+        self.sp_single_label_y.setValue(5.0)
+        self.sp_single_label_y.setSuffix("%")
+        self.sp_single_label_y.valueChanged.connect(self.on_single_label_pos_changed)
+        form.addRow(self.lbl_single_label_y, self.sp_single_label_y)
+        
+        self.lbl_single_label_color = QLabel("标注颜色")
+        self.cmb_single_label_color = QComboBox()
+        self.cmb_single_label_color.addItems(["黑色", "白色"])
+        self.cmb_single_label_color.setCurrentText("黑色")
+        self.cmb_single_label_color.currentTextChanged.connect(self.on_single_label_color_changed)
+        form.addRow(self.lbl_single_label_color, self.cmb_single_label_color)
+        
+        # 默认禁用单个子图标注控件
+        self.lbl_single_label_x.setEnabled(False)
+        self.sp_single_label_x.setEnabled(False)
+        self.lbl_single_label_y.setEnabled(False)
+        self.sp_single_label_y.setEnabled(False)
+        self.lbl_single_label_color.setEnabled(False)
+        self.cmb_single_label_color.setEnabled(False)
+
+        # 子图边框选项
+        self.chk_border = QCheckBox("显示子图边框")
+        self.chk_border.setChecked(True)
+        self.chk_border.stateChanged.connect(self.on_border_changed)
+        form.addRow(self.chk_border)
+        
+        self.lbl_border_width = QLabel("边框宽度（px）")
+        self.sp_border_width = QDoubleSpinBox()
+        self.sp_border_width.setRange(0.1, 10.0)
+        self.sp_border_width.setDecimals(1)
+        self.sp_border_width.setValue(1.0)
+        self.sp_border_width.valueChanged.connect(lambda: self.schedule_preview())
+        form.addRow(self.lbl_border_width, self.sp_border_width)
+        
+        self.lbl_border_color = QLabel("边框颜色")
+        self.cmb_border_color = QComboBox()
+        self.cmb_border_color.addItems(["黑色", "白色", "灰色"])
+        self.cmb_border_color.setCurrentText("黑色")
+        self.cmb_border_color.currentTextChanged.connect(lambda: self.schedule_preview())
+        form.addRow(self.lbl_border_color, self.cmb_border_color)
+        
+        self.lbl_border_style = QLabel("边框样式")
+        self.cmb_border_style = QComboBox()
+        self.cmb_border_style.addItems(["实线", "虚线"])
+        self.cmb_border_style.setCurrentText("实线")
+        self.cmb_border_style.currentTextChanged.connect(lambda: self.schedule_preview())
+        form.addRow(self.lbl_border_style, self.cmb_border_style)
+        
+        # 初始同步边框控件可见性
+        self.on_border_changed()
 
         self.chk_title = QCheckBox("添加标题（可中文/英文）")
         self.chk_title.setChecked(False)
@@ -2086,7 +2733,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.chk_title)
 
         self.ed_title = QLineEdit()
-        self.ed_title.setPlaceholderText("例如：图4-3 不同参数下的温度场对比")
+        self.ed_title.setPlaceholderText("例如：图1-1 不同参数下的速度对比")
         self.ed_title.textChanged.connect(lambda: self.schedule_preview())
         form.addRow("标题文本", self.ed_title)
 
@@ -2106,6 +2753,19 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self.on_export)
         form.addRow(self.btn_export)
 
+        # 创建滚动区域包装右侧参数面板
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(right_content)
+        scroll_area.setWidgetResizable(True)  # 允许内容自适应宽度
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 禁用横向滚动
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)  # 需要时显示纵向滚动条
+        
+        # 包装在GroupBox中
+        right_box = QGroupBox("论文参数 / 布局 / 标注")
+        scroll_layout = QVBoxLayout(right_box)
+        scroll_layout.setContentsMargins(5, 5, 5, 5)
+        scroll_layout.addWidget(scroll_area)
+
         # 主布局：三栏 splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_box)
@@ -2113,12 +2773,16 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_box)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
-        splitter.setStretchFactor(2, 1)
+        splitter.setStretchFactor(2, 2)  # 右侧参数面板宽度与中间相同
 
         root = QWidget()
         root_layout = QHBoxLayout(root)
         root_layout.addWidget(splitter)
         self.setCentralWidget(root)
+
+        # 初始化时禁用单个子图标注控件（没有选中任何面板）
+        self.chk_use_single_label.setEnabled(False)
+        self.chk_use_single_label.setToolTip("请先在画布中选中一个子图")
 
         # 初始化画布尺寸并应用初始布局
         self.on_layout_changed(self.cmb_layout.currentText())
@@ -2224,6 +2888,9 @@ class MainWindow(QMainWindow):
         # 刷新画布布局
         self._refresh_canvas_layout()
         self.schedule_preview()
+        
+        # 保存状态（用于撤销）
+        self._save_state()
 
     def _add_item(self, path: str):
         item = QListWidgetItem()
@@ -2259,11 +2926,25 @@ class MainWindow(QMainWindow):
         # 刷新画布布局
         self._refresh_canvas_layout()
         self.schedule_preview()
+        
+        # 保存状态（用于撤销）
+        self._save_state()
 
     # ---------- 布局切换 ----------
     def on_layout_changed(self, layout_name: str):
         """布局模板切换"""
-        is_custom = (layout_name == "自定义模式")
+        is_custom_mode = (layout_name == "自定义模式")
+        is_quick_custom = (layout_name == "快捷自定义")
+        
+        # 控制快捷自定义布局UI的可见性
+        self.quick_title_widget.setVisible(is_quick_custom)
+        self.layout_type_widget.setVisible(is_quick_custom)
+        
+        # 根据布局类型显示对应的参数控件
+        if is_quick_custom:
+            is_grid = self.rb_grid_layout.isChecked()
+            self.grid_params_widget.setVisible(is_grid)
+            self.irregular_params_widget.setVisible(not is_grid)
         
         # 同步画布尺寸
         self.canvas_editor.set_canvas_size(
@@ -2290,7 +2971,7 @@ class MainWindow(QMainWindow):
             self.canvas_editor.btn_smart_h,
         ]
         for btn in layout_buttons:
-            btn.setVisible(is_custom)
+            btn.setVisible(is_custom_mode)
         
         # 图片取景按钮始终可见
         image_buttons = [
@@ -2307,23 +2988,223 @@ class MainWindow(QMainWindow):
         # 工具栏始终可见
         self.canvas_editor.toolbar.setVisible(True)
         
-        if is_custom:
+        # 控制宽高比控件的启用状态（自定义模式下禁用）
+        aspect_enabled = not is_custom_mode
+        self.cmb_aspect_ratio.setEnabled(aspect_enabled)
+        if aspect_enabled:
+            self.cmb_aspect_ratio.setToolTip("调整子图框的宽高比例\n自动：根据布局自动计算\n其他：所有子图框使用统一比例")
+        else:
+            self.cmb_aspect_ratio.setToolTip("自定义模式下不可用\n在自定义模式中，您可以手动调整每个框的尺寸")
+        
+        # 自定义比例控件也随之禁用
+        if hasattr(self, 'custom_ratio_widget'):
+            if not aspect_enabled and self.custom_ratio_widget.isVisible():
+                self.custom_ratio_widget.setVisible(False)
+        
+        if is_custom_mode:
             # 自定义模式：可自由布局
             # 只有当画布为空时才自动导入列表图片
             if not any(isinstance(i, PanelItem) for i in self.canvas_editor.scene.items()):
                 self._update_canvas_from_images()
+        elif is_quick_custom:
+            # 快捷自定义：使用输入框内容作为布局模板
+            # 如果输入框为空，先设置默认值
+            if not self.ed_custom_layout.text().strip():
+                self.ed_custom_layout.setText("2x2")
+            else:
+                # 应用输入框中的布局
+                self._apply_template_layout(self.ed_custom_layout.text().strip())
         else:
-            # 模板模式：自动按模板布局
+            # 预定义模板模式：自动按模板布局
             self._apply_template_layout(layout_name)
         
         self.schedule_preview()
     
-    def on_custom_grid_changed(self):
-        """(废弃)"""
-        pass
+    def on_custom_layout_input_changed(self):
+        """用户修改自定义布局输入框时触发"""
+        layout_str = self.ed_custom_layout.text().strip()
+        if not layout_str:
+            return
+        
+        # 尝试解析布局字符串
+        parsed = parse_layout_string(layout_str)
+        if not parsed:
+            # 输入无效，不做任何操作
+            return
+        
+        # 应用新的布局
+        self._apply_template_layout(layout_str)
+    
+    
+    # ========== 快捷自定义布局事件处理 ==========
+    def show_layout_help(self):
+        """显示布局帮助对话框"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        help_text = """
+<h3>📐 快捷自定义布局使用说明</h3>
+
+<h4>🔹 规则网格</h4>
+<p>适用于所有子图大小相同的情况</p>
+<ul>
+<li><b>行数</b>：网格的行数（1-10）</li>
+<li><b>列数</b>：网格的列数（1-10）</li>
+<li><b>示例</b>：2行×2列 = 4个相同大小的子图</li>
+</ul>
+
+<h4>🔹 不规则布局</h4>
+<p>适用于每行子图数量不同的情况，下方行自动居中对齐</p>
+<ul>
+<li><b>行数</b>：设定总行数</li>
+<li><b>每行列数</b>：分别设定每一行有几个子图</li>
+<li><b>自动居中</b>：较少子图的行会自动居中对齐</li>
+</ul>
+
+<h4>📝 使用示例</h4>
+<table border="1" cellpadding="5" cellspacing="0">
+<tr><th>需求</th><th>设置方法</th></tr>
+<tr><td>4个图，2×2排列</td><td>规则网格：2行×2列</td></tr>
+<tr><td>6个图，3×2排列</td><td>规则网格：2行×3列</td></tr>
+<tr><td>5个图，上3下2</td><td>不规则：2行，第1行3个，第2行2个</td></tr>
+<tr><td>7个图，上4下3</td><td>不规则：2行，第1行4个，第2行3个</td></tr>
+<tr><td>9个图，上4中3下2</td><td>不规则：3行，各行分别4、3、2个</td></tr>
+</table>
+
+<h4>💡 提示</h4>
+<p>• 布局设定后会自动应用<br>
+• 可以随时切换布局类型<br>
+• 不规则布局会自动计算居中对齐</p>
+"""
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle("快捷自定义布局帮助")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(help_text)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+    
+    def on_layout_type_changed(self):
+        """布局类型切换（规则网格 vs 不规则布局）"""
+        is_grid = self.rb_grid_layout.isChecked()
+        self.grid_params_widget.setVisible(is_grid)
+        self.irregular_params_widget.setVisible(not is_grid)
+        
+        # 更新布局字符串
+        if is_grid:
+            self.on_custom_grid_params_changed()
+        else:
+            self.on_irregular_layout_changed()
+    
+    def on_custom_grid_params_changed(self):
+        """规则网格参数变化"""
+        rows = self.sp_custom_rows.value()
+        cols = self.sp_custom_cols.value()
+        layout_str = f"{rows}x{cols}"
+        self.ed_custom_layout.setText(layout_str)
+    
+    def on_irregular_rows_changed(self):
+        """不规则布局行数变化，动态生成每行的列数控制"""
+        rows = self.sp_irregular_rows.value()
+        
+        # 清空现有的列数控件
+        while self.irregular_cols_layout.count():
+            item = self.irregular_cols_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        self.irregular_col_spinboxes = []
+        
+        # 为每一行创建列数控件
+        for i in range(rows):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(10)
+            
+            label = QLabel(f"第{i+1}行列数:")
+            row_layout.addWidget(label)
+            
+            spinbox = QSpinBox()
+            spinbox.setRange(1, 10)
+            spinbox.setValue(3 if i == 0 else 2)  # 第一行默认3个，其他行默认2个
+            spinbox.setMaximumWidth(60)
+            spinbox.valueChanged.connect(self.on_irregular_layout_changed)
+            row_layout.addWidget(spinbox)
+            
+            row_layout.addStretch()
+            
+            self.irregular_cols_layout.addWidget(row_widget)
+            self.irregular_col_spinboxes.append(spinbox)
+        
+        # 更新布局
+        self.on_irregular_layout_changed()
+    
+    def on_irregular_layout_changed(self):
+        """不规则布局列数变化"""
+        if not self.irregular_col_spinboxes:
+            return
+        
+        cols_list = [sp.value() for sp in self.irregular_col_spinboxes]
+        layout_str = str(cols_list)  # 生成 [3,2] 格式
+        self.ed_custom_layout.setText(layout_str)
+    
+    def on_aspect_ratio_changed(self):
+        """子图宽高比选择改变"""
+        ratio_text = self.cmb_aspect_ratio.currentText()
+        
+        # 显示/隐藏自定义比例控件
+        is_custom = (ratio_text == "自定义比例")
+        self.custom_ratio_widget.setVisible(is_custom)
+        
+        # 如果是自定义模式，不自动应用
+        if not is_custom:
+            self.on_custom_aspect_changed()
+    
+    def on_custom_aspect_changed(self):
+        """自定义宽高比或预设比例改变时，重新应用布局"""
+        # 只在模板模式下有效，自定义模式不受影响
+        layout_name = self.cmb_layout.currentText()
+        if layout_name == "自定义模式":
+            return
+        
+        # 重新应用当前布局
+        if layout_name == "快捷自定义":
+            layout_str = self.ed_custom_layout.text().strip()
+            if layout_str:
+                self._apply_template_layout(layout_str)
+        else:
+            self._apply_template_layout(layout_name)
+    
+    def _get_aspect_ratio(self):
+        """获取当前设置的宽高比"""
+        ratio_text = self.cmb_aspect_ratio.currentText()
+        
+        if ratio_text == "自动（默认）":
+            return None  # 使用默认布局
+        elif ratio_text == "1:1（正方形）":
+            return 1.0
+        elif ratio_text == "4:3（横向）":
+            return 4.0 / 3.0
+        elif ratio_text == "16:9（横向）":
+            return 16.0 / 9.0
+        elif ratio_text == "3:4（竖向）":
+            return 3.0 / 4.0
+        elif ratio_text == "9:16（竖向）":
+            return 9.0 / 16.0
+        elif ratio_text == "自定义比例":
+            width = self.sp_aspect_width.value()
+            height = self.sp_aspect_height.value()
+            return width / height if height > 0 else 1.0
+        
+        return None
     
     def _apply_template_layout(self, layout_name: str):
         """根据布局模板自动创建面板，保留已有的图片编辑参数"""
+        # 检查UI是否已完全初始化（避免初始化阶段调用）
+        if not hasattr(self, 'sp_gap') or not hasattr(self, 'canvas_editor'):
+            return
+        
         try:
             layout = build_layout(layout_name)
             paths = self._collect_paths_from_list()
@@ -2349,6 +3230,42 @@ class MainWindow(QMainWindow):
             content_h = self.canvas_editor.canvas_h - 2 * margin
             gap = float(self.sp_gap.value())
             
+            # 获取宽高比设置
+            aspect_ratio = self._get_aspect_ratio()
+            
+            # 如果设置了宽高比，先计算理想的画布高度
+            if aspect_ratio is not None:
+                # 计算每个cell的实际高度需求
+                # 找出最大列数（用于计算单个框的宽度）
+                max_cols = max(len([c for c in layout if c.y == row_y]) 
+                              for row_y in set(c.y for c in layout))
+                cell_width = content_w / max_cols - gap
+                
+                # 根据宽高比计算理想的单个框高度
+                ideal_cell_height = cell_width / aspect_ratio
+                
+                # 计算行数
+                num_rows = len(set(c.y for c in layout))
+                
+                # 计算理想的内容高度（所有行的高度 + 行间间距）
+                ideal_content_h = ideal_cell_height * num_rows + gap * (num_rows - 1)
+                
+                # 计算理想的画布总高度
+                ideal_canvas_h = ideal_content_h + 2 * margin
+                
+                # 更新画布和UI显示
+                self.canvas_editor.set_canvas_size(
+                    self.canvas_editor.canvas_w,
+                    ideal_canvas_h,
+                    margin
+                )
+                self.sp_height.blockSignals(True)
+                self.sp_height.setValue(ideal_canvas_h)
+                self.sp_height.blockSignals(False)
+                
+                # 重新计算content_h
+                content_h = ideal_canvas_h - 2 * margin
+            
             # 根据布局模板创建面板
             import uuid
             for i, cell in enumerate(layout):
@@ -2357,6 +3274,21 @@ class MainWindow(QMainWindow):
                 y = margin + cell.y * content_h + gap / 2
                 w = cell.w * content_w - gap
                 h = cell.h * content_h - gap
+                
+                # 应用宽高比调整
+                if aspect_ratio is not None:
+                    # 根据宽高比调整框的尺寸
+                    # 保持宽度，调整高度
+                    h = w / aspect_ratio
+                    # 如果调整后的高度超出了cell的高度范围，则调整方案
+                    cell_max_h = cell.h * content_h - gap
+                    if h > cell_max_h:
+                        # 保持高度，调整宽度
+                        h = cell_max_h
+                        w = h * aspect_ratio
+                        # 重新居中x位置
+                        cell_center_x = margin + (cell.x + cell.w / 2) * content_w
+                        x = cell_center_x - w / 2
                 
                 path = paths[i] if i < len(paths) else None
                 
@@ -2383,6 +3315,9 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             print(f"Error applying template layout: {e}")
+        
+        # 触发预览更新
+        self.schedule_preview()
     
     def _refresh_canvas_layout(self):
         """根据当前布局模式刷新画布"""
@@ -2390,7 +3325,45 @@ class MainWindow(QMainWindow):
         if layout_name == "自定义模式":
             self._update_canvas_from_images()
         else:
-            self._apply_template_layout(layout_name)
+            # 模板模式：只更新图片分配，不重建布局
+            self._update_panel_images()
+    
+    def _update_panel_images(self):
+        """更新面板中的图片，保持布局不变"""
+        paths = self._collect_paths_from_list()
+        
+        # 获取现有面板（按label_index排序）
+        panels = []
+        for item in self.canvas_editor.scene.items():
+            if isinstance(item, PanelItem):
+                panels.append(item)
+        
+        # 如果没有面板，需要创建新布局
+        if not panels:
+            self._apply_template_layout(self.cmb_layout.currentText())
+            return
+        
+        # 按label_index排序
+        panels.sort(key=lambda p: p.spec.label_index)
+        
+        # 更新每个面板的图片路径
+        for i, panel in enumerate(panels):
+            if i < len(paths):
+                panel.spec.image_path = paths[i]
+                # 重新加载图片
+                panel._load_image(paths[i])
+            else:
+                panel.spec.image_path = None
+                panel.pixmap = None
+            panel.update()
+        
+        # 如果图片数量多于面板数量，需要应用新布局
+        if len(paths) > len(panels):
+            self._apply_template_layout(self.cmb_layout.currentText())
+        else:
+            # 触发预览更新
+            self.schedule_preview()
+    
     
     def _update_canvas_from_images(self):
         """使用图片列表更新画布编辑器（用于自定义模式）"""
@@ -2495,6 +3468,75 @@ class MainWindow(QMainWindow):
                 if isinstance(item, PanelItem):
                     item._update_label_handle_pos(x_ratio, y_ratio)
     
+    def on_border_changed(self):
+        """边框复选框状态改变时，切换相关控件的可见性"""
+        enabled = self.chk_border.isChecked()
+        self.lbl_border_width.setVisible(enabled)
+        self.sp_border_width.setVisible(enabled)
+        self.lbl_border_color.setVisible(enabled)
+        self.cmb_border_color.setVisible(enabled)
+        self.lbl_border_style.setVisible(enabled)
+        self.cmb_border_style.setVisible(enabled)
+        self.schedule_preview()
+    
+    def on_single_label_toggle(self):
+        """单个子图标注独立控制开关"""
+        enabled = self.chk_use_single_label.isChecked()
+        self.lbl_single_label_x.setEnabled(enabled)
+        self.sp_single_label_x.setEnabled(enabled)
+        self.lbl_single_label_y.setEnabled(enabled)
+        self.sp_single_label_y.setEnabled(enabled)
+        self.lbl_single_label_color.setEnabled(enabled)
+        self.cmb_single_label_color.setEnabled(enabled)
+        
+        # 更新当前选中的面板
+        if hasattr(self, 'canvas_editor'):
+            selected_items = [item for item in self.canvas_editor.scene.selectedItems() 
+                            if isinstance(item, PanelItem)]
+            if selected_items:
+                panel = selected_items[0]
+                if enabled:
+                    # 启用独立标注，设置初始值
+                    panel.spec.label_x = self.sp_single_label_x.value() / 100.0
+                    panel.spec.label_y = self.sp_single_label_y.value() / 100.0
+                    panel.spec.label_color = self.cmb_single_label_color.currentText()
+                else:
+                    # 禁用独立标注，清除设置
+                    panel.spec.label_x = None
+                    panel.spec.label_y = None
+                    panel.spec.label_color = None
+                panel.update()
+                self.schedule_preview()
+    
+    def on_single_label_pos_changed(self):
+        """单个子图标注位置改变"""
+        if not self.chk_use_single_label.isChecked():
+            return
+        
+        if hasattr(self, 'canvas_editor'):
+            selected_items = [item for item in self.canvas_editor.scene.selectedItems() 
+                            if isinstance(item, PanelItem)]
+            if selected_items:
+                panel = selected_items[0]
+                panel.spec.label_x = self.sp_single_label_x.value() / 100.0
+                panel.spec.label_y = self.sp_single_label_y.value() / 100.0
+                panel.update()
+                self.schedule_preview()
+    
+    def on_single_label_color_changed(self):
+        """单个子图标注颜色改变"""
+        if not self.chk_use_single_label.isChecked():
+            return
+        
+        if hasattr(self, 'canvas_editor'):
+            selected_items = [item for item in self.canvas_editor.scene.selectedItems() 
+                            if isinstance(item, PanelItem)]
+            if selected_items:
+                panel = selected_items[0]
+                panel.spec.label_color = self.cmb_single_label_color.currentText()
+                panel.update()
+                self.schedule_preview()
+    
     def _get_config(self) -> RenderConfig:
         layout_name = self.cmb_layout.currentText()
         width = float(self.sp_width.value())
@@ -2537,7 +3579,15 @@ class MainWindow(QMainWindow):
             background_white=True,
             custom_specs=custom_specs,
             label_custom_x=self.slider_label_x.value() / 100.0,
-            label_custom_y=self.slider_label_y.value() / 100.0
+            label_custom_y=self.slider_label_y.value() / 100.0,
+            label_color=self.cmb_label_color.currentText(),
+            label_style=self.cmb_label_style.currentText(),
+            border_enabled=bool(self.chk_border.isChecked()),
+            border_width=float(self.sp_border_width.value()),
+            border_color=self.cmb_border_color.currentText(),
+            border_style=self.cmb_border_style.currentText(),
+            label_font_weight="Regular",
+            label_font_italic=False
         )
 
     def update_preview(self):
@@ -2555,8 +3605,16 @@ class MainWindow(QMainWindow):
         self.last_render = img
         pix = pil_to_qpixmap(img)
         
+        # 检查 pixmap 是否有效
+        if pix is None or pix.isNull():
+            self.preview_label.setText("渲染预览失败")
+            return
+        
         # 更新预览标签
         target = self.preview_label.size() - QSize(20, 20)
+        # 确保目标尺寸有效
+        if target.width() <= 0 or target.height() <= 0:
+            target = QSize(300, 200)  # 使用默认最小尺寸
         pix2 = pix.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.preview_label.setPixmap(pix2)
         
@@ -2570,6 +3628,247 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(warnings[0], 6000)
         else:
             self.statusBar().clearMessage()
+
+    # ========== 撤销/重做功能 ==========
+    def _save_state(self):
+        """保存当前状态到撤销栈"""
+        state = {
+            'image_paths': self.image_paths.copy(),
+            'layout': self.canvas_editor.export_layout(),
+            'settings': {
+                'layout_name': self.cmb_layout.currentText(),
+                'width': self.sp_width.value(),
+                'height': self.sp_height.value(),
+                'dpi': self.sp_dpi.currentText(),
+                'margin': self.sp_margin.value(),
+                'gap': self.sp_gap.value(),
+                'fit_mode': self.cmb_fit_mode.currentText(),
+                'auto_trim': self.chk_trim.isChecked(),
+                'label_enabled': self.chk_label.isChecked(),
+                'label_pos': self.cmb_label_pos.currentText(),
+                'label_size': self.sp_label_pt.value(),
+                'label_padding': self.sp_label_pad.value(),
+                'title_enabled': self.chk_title.isChecked(),
+                'title_text': self.ed_title.text(),
+                'title_size': self.sp_title_pt.value(),
+                'border_enabled': self.chk_border.isChecked() if hasattr(self, 'chk_border') else False,
+                'border_width': self.sp_border_width.value() if hasattr(self, 'sp_border_width') else 1.0,
+                'border_color': self.cmb_border_color.currentText() if hasattr(self, 'cmb_border_color') else "黑色",
+                'border_style': self.cmb_border_style.currentText() if hasattr(self, 'cmb_border_style') else "实线",
+            }
+        }
+        
+        self.undo_stack.append(state)
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        
+        # 保存新状态后清空重做栈
+        self.redo_stack.clear()
+        
+        # 更新按钮状态
+        self.act_undo.setEnabled(len(self.undo_stack) > 1)
+        self.act_redo.setEnabled(False)
+    
+    def _restore_state(self, state):
+        """恢复状态"""
+        # 恢复图片列表
+        self.image_paths = state['image_paths'].copy()
+        self.list_widget.clear()
+        for path in self.image_paths:
+            self._add_to_list(path)
+        
+        # 恢复布局
+        self.canvas_editor.import_layout(state['layout'])
+        
+        # 恢复设置
+        settings = state['settings']
+        self.cmb_layout.setCurrentText(settings.get('layout_name', '2x2'))
+        self.sp_width.setValue(settings.get('width', 180))
+        self.sp_height.setValue(settings.get('height', 120))
+        self.sp_dpi.setCurrentText(settings.get('dpi', '300'))
+        self.sp_margin.setValue(settings.get('margin', 5.0))
+        self.sp_gap.setValue(settings.get('gap', 2.0))
+        self.cmb_fit_mode.setCurrentText(settings.get('fit_mode', '智能填充（推荐）'))
+        self.chk_trim.setChecked(settings.get('auto_trim', False))
+        self.chk_label.setChecked(settings.get('label_enabled', True))
+        self.cmb_label_pos.setCurrentText(settings.get('label_pos', '左上'))
+        self.sp_label_pt.setValue(settings.get('label_size', 10))
+        self.sp_label_pad.setValue(settings.get('label_padding', 1.5))
+        self.chk_title.setChecked(settings.get('title_enabled', False))
+        self.ed_title.setText(settings.get('title_text', ''))
+        self.sp_title_pt.setValue(settings.get('title_size', 12))
+        
+        if hasattr(self, 'chk_border'):
+            self.chk_border.setChecked(settings.get('border_enabled', True))
+            self.sp_border_width.setValue(settings.get('border_width', 1.0))
+            self.cmb_border_color.setCurrentText(settings.get('border_color', '黑色'))
+            self.cmb_border_style.setCurrentText(settings.get('border_style', '实线'))
+        
+        self.schedule_preview()
+    
+    def on_undo(self):
+        """撤销"""
+        if len(self.undo_stack) <= 1:
+            return
+        
+        # 将当前状态移到重做栈
+        current_state = self.undo_stack.pop()
+        self.redo_stack.append(current_state)
+        
+        # 恢复上一个状态
+        previous_state = self.undo_stack[-1]
+        self._restore_state(previous_state)
+        
+        # 更新按钮状态
+        self.act_undo.setEnabled(len(self.undo_stack) > 1)
+        self.act_redo.setEnabled(len(self.redo_stack) > 0)
+    
+    def on_redo(self):
+        """重做"""
+        if not self.redo_stack:
+            return
+        
+        # 从重做栈取出状态
+        state = self.redo_stack.pop()
+        self.undo_stack.append(state)
+        
+        # 恢复状态
+        self._restore_state(state)
+        
+        # 更新按钮状态
+        self.act_undo.setEnabled(len(self.undo_stack) > 1)
+        self.act_redo.setEnabled(len(self.redo_stack) > 0)
+    
+    # ========== 布局保存/加载功能 ==========
+    def on_save_layout(self):
+        """保存布局"""
+        if not self.layout_manager:
+            QMessageBox.warning(self, "功能不可用", "布局管理器未加载")
+            return
+        
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "保存布局", self.layout_manager.layouts_dir, 
+            "布局文件 (*.layout);;所有文件 (*)"
+        )
+        
+        if not filepath:
+            return
+        
+        # 收集当前布局数据
+        layout_data = {
+            'image_paths': self.image_paths,
+            'panels': self.canvas_editor.export_layout(),
+            'settings': {
+                'layout_name': self.cmb_layout.currentText(),
+                'canvas_width_mm': self.sp_width.value(),
+                'canvas_height_mm': self.sp_height.value(),
+                'dpi': int(self.sp_dpi.currentText()),
+                'margin_mm': self.sp_margin.value(),
+                'gap_mm': self.sp_gap.value(),
+                'fit_mode': self.cmb_fit_mode.currentText(),
+                'auto_trim': self.chk_trim.isChecked(),
+                'label_enabled': self.chk_label.isChecked(),
+                'label_pos': self.cmb_label_pos.currentText(),
+                'label_size_pt': self.sp_label_pt.value(),
+                'label_padding_mm': self.sp_label_pad.value(),
+                'title_text': self.ed_title.text(),
+                'title_enabled': self.chk_title.isChecked(),
+                'title_size_pt': self.sp_title_pt.value(),
+            }
+        }
+        
+        # 添加边框设置
+        if hasattr(self, 'chk_border'):
+            layout_data['settings']['border_enabled'] = self.chk_border.isChecked()
+            layout_data['settings']['border_width'] = self.sp_border_width.value()
+            layout_data['settings']['border_color'] = self.cmb_border_color.currentText()
+            layout_data['settings']['border_style'] = self.cmb_border_style.currentText()
+        
+        # 保存
+        if self.layout_manager.save_layout(filepath, layout_data):
+            QMessageBox.information(self, "保存成功", f"布局已保存到：\n{filepath}")
+        else:
+            QMessageBox.critical(self, "保存失败", "布局保存失败，请检查文件权限")
+    
+    def on_load_layout(self):
+        """加载布局"""
+        if not self.layout_manager:
+            QMessageBox.warning(self, "功能不可用", "布局管理器未加载")
+            return
+        
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "加载布局", self.layout_manager.layouts_dir,
+            "布局文件 (*.layout);;所有文件 (*)"
+        )
+        
+        if not filepath:
+            return
+        
+        # 加载
+        layout_data = self.layout_manager.load_layout(filepath)
+        if not layout_data:
+            QMessageBox.critical(self, "加载失败", "无法加载布局文件")
+            return
+        
+        # 恢复图片列表
+        self.image_paths = layout_data.get('image_paths', [])
+        self.list_widget.clear()
+        for path in self.image_paths:
+            self._add_to_list(path)
+        
+        # 恢复布局
+        panels = layout_data.get('panels', [])
+        self.canvas_editor.import_layout(panels)
+        
+        # 恢复设置
+        settings = layout_data.get('settings', {})
+        if settings:
+            self.cmb_layout.setCurrentText(settings.get('layout_name', '2x2'))
+            self.sp_width.setValue(settings.get('canvas_width_mm', 180))
+            self.sp_height.setValue(settings.get('canvas_height_mm', 120))
+            self.sp_dpi.setCurrentText(str(settings.get('dpi', 300)))
+            self.sp_margin.setValue(settings.get('margin_mm', 5.0))
+            self.sp_gap.setValue(settings.get('gap_mm', 2.0))
+            self.cmb_fit_mode.setCurrentText(settings.get('fit_mode', '智能填充（推荐）'))
+            self.chk_trim.setChecked(settings.get('auto_trim', False))
+            self.chk_label.setChecked(settings.get('label_enabled', True))
+            self.cmb_label_pos.setCurrentText(settings.get('label_pos', '左上'))
+            self.sp_label_pt.setValue(settings.get('label_size_pt', 10))
+            self.sp_label_pad.setValue(settings.get('label_padding_mm', 1.5))
+            self.chk_title.setChecked(settings.get('title_enabled', False))
+            self.ed_title.setText(settings.get('title_text', ''))
+            self.sp_title_pt.setValue(settings.get('title_size_pt', 12))
+            
+            if hasattr(self, 'chk_border'):
+                self.chk_border.setChecked(settings.get('border_enabled', True))
+                self.sp_border_width.setValue(settings.get('border_width', 1.0))
+                self.cmb_border_color.setCurrentText(settings.get('border_color', '黑色'))
+                self.cmb_border_style.setCurrentText(settings.get('border_style', '实线'))
+        
+        self.schedule_preview()
+        QMessageBox.information(self, "加载成功", f"布局已从以下文件加载：\n{filepath}")
+    
+    # ========== 快捷键支持 ==========
+    def keyPressEvent(self, event):
+        """处理快捷键"""
+        key = event.key()
+        modifiers = event.modifiers()
+        
+        # Ctrl+A: 全选面板
+        if modifiers == Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_A:
+            for item in self.canvas_editor.scene.items():
+                if isinstance(item, PanelItem):
+                    item.setSelected(True)
+            event.accept()
+            return
+        
+        # Esc: 取消选择
+        if key == Qt.Key.Key_Escape:
+            self.canvas_editor.scene.clearSelection()
+            event.accept()
+            return
+        
+        super().keyPressEvent(event)
 
     # ---------- Export ----------
     def on_export(self):
@@ -2652,3 +3951,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
